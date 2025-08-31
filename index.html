@@ -168,35 +168,44 @@ function loop(){
   if(!holding && !gameOver) bounceT+=dt;
 
   // === DETEKSI CROSSING pakai bidang depan (yFront), prioritas hitam, TIDAK PERNAH stop di kuning ===
-  if (holding && !gameOver) {
-    const HIT_PAD = RAD(6);
-    for (const r of rings) {
-      const yFrontPrev = (r.y - prevCamY) - cfg.tiltPx*0.4;
-      const yFrontCur  = (r.y - cameraY) - cfg.tiltPx*0.4;
-      if (!(yFrontPrev >= ballY && yFrontCur < ballY)) continue;
+// === DETEKSI CROSSING pakai bidang depan (yFront) ===
+if (holding && !gameOver) {
+  const HIT_PAD = RAD(6);
 
-      const rotW = r.rot + worldTheta;
-      const phi  = angNorm(frontDir - rotW);
+  for (const r of rings) {
+    const yFrontPrev = (r.y - prevCamY) - cfg.tiltPx*0.4;
+    const yFrontCur  = (r.y - cameraY) - cfg.tiltPx*0.4;
 
-      // 1) black => game over
+    if (!(yFrontPrev >= ballY && yFrontCur < ballY)) continue;
+
+    const rotW = r.rot + worldTheta;
+    const phi  = angNorm(frontDir - rotW);
+
+    // cek GAP
+    const inGap = Math.abs(angDiff(phi, r.gap.c)) <= (r.gap.a/2);
+
+    if (inGap) {
+      // AMAN → tambah skor
+      streak++; mult=Math.min(6,1+Math.floor(streak/3));
+      score += 1*mult; updateHud();
+      fallSpeed=Math.min(cfg.fallMax,fallSpeed+cfg.fallStep);
+      spinSpeed=Math.min(cfg.spinMax,spinSpeed+cfg.spinGain);
+      spawnParticles(r.y - cameraY);
+    } else {
+      // bukan gap = zona tidak aman
       let hitBlack=false;
       for(const b of r.blocks){
         if (Math.abs(angDiff(phi,b.c)) <= (b.a/2 + HIT_PAD)) { hitBlack=true; break; }
       }
-      if(hitBlack){ doGameOver(); break; }
-
-      // 2) gap => skor
-      const inGap = Math.abs(angDiff(phi, r.gap.c)) <= (r.gap.a/2);
-      if(inGap){
-        streak++; mult=Math.min(6,1+Math.floor(streak/3));
-        score += 1*mult; updateHud();
-        fallSpeed=Math.min(cfg.fallMax,fallSpeed+cfg.fallStep);
-        spinSpeed=Math.min(cfg.spinMax,spinSpeed+cfg.spinGain);
-        spawnParticles(r.y - cameraY);
+      if (hitBlack) {
+        doGameOver(); 
+        break;
       }
-      // 3) kuning => tidak ada aksi (tetap turun). TIDAK set holding=false.
+      // kalau bukan block → berarti kuning → tetap turun tanpa skor
     }
   }
+}
+
 
   // partikel & shake
   for(let i=parts.length-1;i>=0;i--){
