@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-<title>Helix – Tanpa Pilar (Front-Cross, Black=Dead, Sticky Top)</title>
+<title>Helix – Hold Selalu Turun, Black=Dead, Start di Atas Ring</title>
 <style>
   html,body{height:100%;margin:0;overflow:hidden;background:#120F26}
   body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
@@ -21,7 +21,7 @@
 <body>
   <div id="hud">
     <div id="score">Skor: 0 • Best: 0 • ×1</div>
-    <div id="hint">Tahan: turun • Lepas: berhenti • Ring berputar otomatis</div>
+    <div id="hint">Tahan: turun terus • Lepas: idle memantul • Ring auto-rotate</div>
   </div>
   <div id="overlay">
     <div id="card">
@@ -60,14 +60,14 @@ const cfg={
   ringScaleY:0.62, tiltPx:28, cameraZoom:1.06,
   frontWallPx:14, dropShadowPx:6,
 
-  // geometri ring (tanpa pilar)
+  // geometri ring
   innerHoleRatio:0.12,
   ringThickness:0.19,
   interLayerGapPx:4,
 
   // layout tower
   visibleRings:14, bufferRings:12,
-  startFrontGapPx:12,
+  startFrontGapPx:0,          // ⬅️ start: bola tepat di atas permukaan depan
   bottomCutRatio:0.94,
 
   // gameplay
@@ -122,7 +122,8 @@ function resetWorld(){
   layerSpacing=(rOuter-rInner)+cfg.interLayerGapPx;
 
   rings.length=0; const count=cfg.visibleRings+cfg.bufferRings;
-  let y=(ballY+cfg.startFrontGapPx)+cfg.tiltPx*0.4-layerSpacing;
+  // y diatur agar ring depan pertama tepat di posisi bola
+  let y=(ballY+cfg.startFrontGapPx)+cfg.tiltPx*0.4 - layerSpacing;
   for(let i=0;i<count;i++){
     y+=layerSpacing;
     const rot=Math.random()*TAU-PI;
@@ -158,31 +159,26 @@ let last=performance.now()/1000;
 function loop(){
   const now=performance.now()/1000,dt=Math.min(0.05,now-last); last=now;
 
-  // --- simpan posisi kamera sebelum update (UNTUK CROSSING Y FRONT) ---
   const prevCamY = cameraY;
 
   // rotasi & kamera
   worldTheta += cfg.spinDir*spinSpeed*dt;
-  if(holding) cameraYTarget += fallSpeed*dt;
+  if(holding) cameraYTarget += fallSpeed*dt;        // ⬅️ hold = selalu tambah target (tidak berhenti)
   cameraY += (cameraYTarget-cameraY)*Math.min(1,cfg.cameraEase*60*dt);
   if(!holding && !gameOver) bounceT+=dt;
 
-  // === DETEKSI CROSSING PAKAI BIDANG DEPAN (yFront), PRIORITAS HITAM ===
+  // === DETEKSI CROSSING pakai bidang depan (yFront), prioritas hitam, TIDAK PERNAH stop di kuning ===
   if (holding && !gameOver) {
-    const HIT_PAD = RAD(6); // toleransi tepi block
-
+    const HIT_PAD = RAD(6);
     for (const r of rings) {
-      // yFront = y - tilt*0.4
       const yFrontPrev = (r.y - prevCamY) - cfg.tiltPx*0.4;
       const yFrontCur  = (r.y - cameraY) - cfg.tiltPx*0.4;
-
-      // ring depan melintas garis bola dari atas ke bawah?
       if (!(yFrontPrev >= ballY && yFrontCur < ballY)) continue;
 
       const rotW = r.rot + worldTheta;
       const phi  = angNorm(frontDir - rotW);
 
-      // 1) block dulu => mati
+      // 1) black => game over
       let hitBlack=false;
       for(const b of r.blocks){
         if (Math.abs(angDiff(phi,b.c)) <= (b.a/2 + HIT_PAD)) { hitBlack=true; break; }
@@ -197,16 +193,12 @@ function loop(){
         fallSpeed=Math.min(cfg.fallMax,fallSpeed+cfg.fallStep);
         spinSpeed=Math.min(cfg.spinMax,spinSpeed+cfg.spinGain);
         spawnParticles(r.y - cameraY);
-      }else{
-        // 3) kuning => ketahan, hentikan target kamera biar nggak “narik”
-        streak=0; mult=1; updateHud();
-        holding=false;
-        cameraYTarget = cameraY; // ⬅️ penting: sinkron supaya tidak naik sendiri
       }
+      // 3) kuning => tidak ada aksi (tetap turun). TIDAK set holding=false.
     }
   }
 
-  // efek partikel
+  // partikel & shake
   for(let i=parts.length-1;i>=0;i--){
     const p=parts[i]; p.t+=dt; if(p.t>p.life){parts.splice(i,1);continue;}
     p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=400*dt;
@@ -276,7 +268,6 @@ function draw(){
   jobs.sort((a,b)=>b.depth-a.depth); for(const j of jobs) j.draw();
 
   // ===== Bola: “di atas ring depan” saat idle =====
-  // cari permukaan ring depan tepat di atas posisi bola
   let surfaceY = null;
   for (const r of rings) {
     const y = r.y - cameraY;
@@ -286,7 +277,7 @@ function draw(){
     }
   }
 
-  // shadow kontak di permukaan saat idle
+  // shadow kontak saat idle
   if (!holding && surfaceY !== null) {
     ctx.save();
     ctx.translate(W/2 + shx*0.35, surfaceY + shy*0.35);
@@ -304,10 +295,9 @@ function draw(){
     const bob = (holding?0:Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz)*cfg.idleBounceAmp);
     bY = ballY + (holding?0:bob);
   } else {
-    // duduk di permukaan ring dan memantul naik
-    const base = surfaceY - ballR;
+    const base = surfaceY - ballR; // menyentuh permukaan
     const bob  = Math.abs(Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz))*cfg.idleBounceAmp;
-    bY = base - bob;
+    bY = base - bob;               // mantul ke atas
   }
 
   ctx.restore(); // end clip
@@ -355,7 +345,7 @@ function drawRingTop(yTop,ring,color,paintGapBg,shx=0){
   ctx.beginPath(); ctx.arc(0,0,rOuter,0,TAU); ctx.stroke();
   ctx.beginPath(); ctx.arc(0,0,rInner,0,TAU); ctx.stroke();
 
-  // well shading (kedalaman lubang)
+  // kedalaman lubang (well)
   const well=ctx.createRadialGradient(0,0,rInner*0.2,0,0,rInner*1.05);
   well.addColorStop(0,'rgba(0,0,0,0.18)');
   well.addColorStop(1,'rgba(0,0,0,0)');
