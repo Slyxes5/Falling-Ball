@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-<title>Helix – Tanpa Pilar (Black = Game Over, Bola Mantul di Atas Ring)</title>
+<title>Helix – Tanpa Pilar (Front-Cross, Black=Dead, Sticky Top)</title>
 <style>
   html,body{height:100%;margin:0;overflow:hidden;background:#120F26}
   body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
@@ -82,7 +82,6 @@ const cfg={
   gapDeg:120, blocksPerRing:1, blockDeg:44,
 
   // bola idle/bounce
-  ballIdleLift:0,           // tak perlu diangkat; kita pakai permukaan ring
   idleBounceAmp:6, idleBounceHz:1.8,
 
   // efek
@@ -159,46 +158,55 @@ let last=performance.now()/1000;
 function loop(){
   const now=performance.now()/1000,dt=Math.min(0.05,now-last); last=now;
 
+  // --- simpan posisi kamera sebelum update (UNTUK CROSSING Y FRONT) ---
+  const prevCamY = cameraY;
+
+  // rotasi & kamera
   worldTheta += cfg.spinDir*spinSpeed*dt;
   if(holding) cameraYTarget += fallSpeed*dt;
   cameraY += (cameraYTarget-cameraY)*Math.min(1,cfg.cameraEase*60*dt);
   if(!holding && !gameOver) bounceT+=dt;
 
-  // === DETEKSI CROSSING: PRIORITAS HITAM ===
+  // === DETEKSI CROSSING PAKAI BIDANG DEPAN (yFront), PRIORITAS HITAM ===
   if (holding && !gameOver) {
-    const prev = cameraY - fallSpeed * dt;
     const HIT_PAD = RAD(6); // toleransi tepi block
 
     for (const r of rings) {
-      const was = r.y - prev, cur = r.y - cameraY;
-      if (!(was >= ballY && cur < ballY)) continue;
+      // yFront = y - tilt*0.4
+      const yFrontPrev = (r.y - prevCamY) - cfg.tiltPx*0.4;
+      const yFrontCur  = (r.y - cameraY) - cfg.tiltPx*0.4;
+
+      // ring depan melintas garis bola dari atas ke bawah?
+      if (!(yFrontPrev >= ballY && yFrontCur < ballY)) continue;
 
       const rotW = r.rot + worldTheta;
       const phi  = angNorm(frontDir - rotW);
 
       // 1) block dulu => mati
-      let hitBlack = false;
-      for (const b of r.blocks) {
-        if (Math.abs(angDiff(phi, b.c)) <= (b.a/2 + HIT_PAD)) { hitBlack = true; break; }
+      let hitBlack=false;
+      for(const b of r.blocks){
+        if (Math.abs(angDiff(phi,b.c)) <= (b.a/2 + HIT_PAD)) { hitBlack=true; break; }
       }
-      if (hitBlack) { doGameOver(); break; }
+      if(hitBlack){ doGameOver(); break; }
 
       // 2) gap => skor
-      const inGap = Math.abs(angDiff(phi, r.gap.c)) <= (r.gap.a / 2);
-      if (inGap) {
-        streak++; mult = Math.min(6, 1 + Math.floor(streak/3));
+      const inGap = Math.abs(angDiff(phi, r.gap.c)) <= (r.gap.a/2);
+      if(inGap){
+        streak++; mult=Math.min(6,1+Math.floor(streak/3));
         score += 1*mult; updateHud();
-        fallSpeed = Math.min(cfg.fallMax, fallSpeed + cfg.fallStep);
-        spinSpeed = Math.min(cfg.spinMax,  spinSpeed + cfg.spinGain);
+        fallSpeed=Math.min(cfg.fallMax,fallSpeed+cfg.fallStep);
+        spinSpeed=Math.min(cfg.spinMax,spinSpeed+cfg.spinGain);
         spawnParticles(r.y - cameraY);
-      } else {
-        // 3) segmen kuning => ketahan
-        streak=0; mult=1; updateHud(); holding=false;
+      }else{
+        // 3) kuning => ketahan, hentikan target kamera biar nggak “narik”
+        streak=0; mult=1; updateHud();
+        holding=false;
+        cameraYTarget = cameraY; // ⬅️ penting: sinkron supaya tidak naik sendiri
       }
     }
   }
 
-  // parts
+  // efek partikel
   for(let i=parts.length-1;i>=0;i--){
     const p=parts[i]; p.t+=dt; if(p.t>p.life){parts.splice(i,1);continue;}
     p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=400*dt;
@@ -273,13 +281,12 @@ function draw(){
   for (const r of rings) {
     const y = r.y - cameraY;
     const yFront = Math.round(y - cfg.tiltPx*0.4);
-    // permukaan depan yang paling dekat di atas bola
     if (yFront >= ballY - 2 && (surfaceY === null || yFront < surfaceY)) {
       surfaceY = yFront;
     }
   }
 
-  // gambar shadow kontak (ellipse) di permukaan saat idle
+  // shadow kontak di permukaan saat idle
   if (!holding && surfaceY !== null) {
     ctx.save();
     ctx.translate(W/2 + shx*0.35, surfaceY + shy*0.35);
@@ -294,14 +301,13 @@ function draw(){
   // posisi bola
   let bY;
   if (holding || gameOver || surfaceY === null) {
-    // normal (turun / gameover / belum dapat permukaan)
-    const lift = holding?0:0;
-    bY = ballY - lift + (holding?0:Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz)*cfg.idleBounceAmp);
+    const bob = (holding?0:Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz)*cfg.idleBounceAmp);
+    bY = ballY + (holding?0:bob);
   } else {
-    // duduk di permukaan ring dan memantul ke atas
-    const base = surfaceY - ballR; // menyentuh permukaan
+    // duduk di permukaan ring dan memantul naik
+    const base = surfaceY - ballR;
     const bob  = Math.abs(Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz))*cfg.idleBounceAmp;
-    bY = base - bob; // memantul ke atas (tidak menembus permukaan)
+    bY = base - bob;
   }
 
   ctx.restore(); // end clip
