@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-<title>Helix – Hold Selalu Turun, Black=Dead, Start di Atas Ring</title>
+<title>Helix – Kuning = Poin, Hitam = Game Over</title>
 <style>
   html,body{height:100%;margin:0;overflow:hidden;background:#120F26}
   body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
@@ -21,7 +21,7 @@
 <body>
   <div id="hud">
     <div id="score">Skor: 0 • Best: 0 • ×1</div>
-    <div id="hint">Tahan: turun terus • Lepas: idle memantul • Ring auto-rotate</div>
+    <div id="hint">Tahan: turun terus • Lepas: idle memantul • Hitam = KO</div>
   </div>
   <div id="overlay">
     <div id="card">
@@ -67,7 +67,7 @@ const cfg={
 
   // layout tower
   visibleRings:14, bufferRings:12,
-  startFrontGapPx:0,          // ⬅️ start: bola tepat di atas permukaan depan
+  startFrontGapPx:0,          // start: bola tepat di atas ring depan
   bottomCutRatio:0.94,
 
   // gameplay
@@ -78,10 +78,10 @@ const cfg={
   // auto-rotate
   spinStart:1.0, spinGain:0.05, spinMax:2.6, spinDir:1,
 
-  // celah & blok
+  // celah & blok (gap masih divisualkan; skor tidak pakai ini)
   gapDeg:120, blocksPerRing:1, blockDeg:44,
 
-  // bola idle/bounce
+  // idle bounce
   idleBounceAmp:6, idleBounceHz:1.8,
 
   // efek
@@ -122,7 +122,6 @@ function resetWorld(){
   layerSpacing=(rOuter-rInner)+cfg.interLayerGapPx;
 
   rings.length=0; const count=cfg.visibleRings+cfg.bufferRings;
-  // y diatur agar ring depan pertama tepat di posisi bola
   let y=(ballY+cfg.startFrontGapPx)+cfg.tiltPx*0.4 - layerSpacing;
   for(let i=0;i<count;i++){
     y+=layerSpacing;
@@ -163,49 +162,36 @@ function loop(){
 
   // rotasi & kamera
   worldTheta += cfg.spinDir*spinSpeed*dt;
-  if(holding) cameraYTarget += fallSpeed*dt;        // ⬅️ hold = selalu tambah target (tidak berhenti)
+  if(holding) cameraYTarget += fallSpeed*dt;        // hold = selalu turun
   cameraY += (cameraYTarget-cameraY)*Math.min(1,cfg.cameraEase*60*dt);
   if(!holding && !gameOver) bounceT+=dt;
 
-  // === DETEKSI CROSSING pakai bidang depan (yFront), prioritas hitam, TIDAK PERNAH stop di kuning ===
-// === DETEKSI CROSSING pakai bidang depan (yFront) ===
-if (holding && !gameOver) {
-  const HIT_PAD = RAD(6);
+  // === CROSSING: hanya cek HITAM; selain hitam (kuning/“gap”) = poin ===
+  if (holding && !gameOver) {
+    const HIT_PAD = RAD(6);
+    for (const r of rings) {
+      const yFrontPrev = (r.y - prevCamY) - cfg.tiltPx*0.4;
+      const yFrontCur  = (r.y - cameraY) - cfg.tiltPx*0.4;
+      if (!(yFrontPrev >= ballY && yFrontCur < ballY)) continue;
 
-  for (const r of rings) {
-    const yFrontPrev = (r.y - prevCamY) - cfg.tiltPx*0.4;
-    const yFrontCur  = (r.y - cameraY) - cfg.tiltPx*0.4;
+      const rotW = r.rot + worldTheta;
+      const phi  = angNorm(frontDir - rotW);
 
-    if (!(yFrontPrev >= ballY && yFrontCur < ballY)) continue;
+      // 1) kalau menyentuh block hitam → game over
+      let hitBlack=false;
+      for(const b of r.blocks){
+        if (Math.abs(angDiff(phi,b.c)) <= (b.a/2 + HIT_PAD)) { hitBlack=true; break; }
+      }
+      if(hitBlack){ doGameOver(); break; }
 
-    const rotW = r.rot + worldTheta;
-    const phi  = angNorm(frontDir - rotW);
-
-    // cek GAP
-    const inGap = Math.abs(angDiff(phi, r.gap.c)) <= (r.gap.a/2);
-
-    if (inGap) {
-      // AMAN → tambah skor
+      // 2) selain hitam (kuning maupun area gap) dianggap tembus aman → skor
       streak++; mult=Math.min(6,1+Math.floor(streak/3));
       score += 1*mult; updateHud();
       fallSpeed=Math.min(cfg.fallMax,fallSpeed+cfg.fallStep);
       spinSpeed=Math.min(cfg.spinMax,spinSpeed+cfg.spinGain);
       spawnParticles(r.y - cameraY);
-    } else {
-      // bukan gap = zona tidak aman
-      let hitBlack=false;
-      for(const b of r.blocks){
-        if (Math.abs(angDiff(phi,b.c)) <= (b.a/2 + HIT_PAD)) { hitBlack=true; break; }
-      }
-      if (hitBlack) {
-        doGameOver(); 
-        break;
-      }
-      // kalau bukan block → berarti kuning → tetap turun tanpa skor
     }
   }
-}
-
 
   // partikel & shake
   for(let i=parts.length-1;i>=0;i--){
@@ -276,7 +262,7 @@ function draw(){
 
   jobs.sort((a,b)=>b.depth-a.depth); for(const j of jobs) j.draw();
 
-  // ===== Bola: “di atas ring depan” saat idle =====
+  // ===== Bola “di atas ring depan” saat idle =====
   let surfaceY = null;
   for (const r of rings) {
     const y = r.y - cameraY;
@@ -304,9 +290,9 @@ function draw(){
     const bob = (holding?0:Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz)*cfg.idleBounceAmp);
     bY = ballY + (holding?0:bob);
   } else {
-    const base = surfaceY - ballR; // menyentuh permukaan
+    const base = surfaceY - ballR;
     const bob  = Math.abs(Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz))*cfg.idleBounceAmp;
-    bY = base - bob;               // mantul ke atas
+    bY = base - bob;
   }
 
   ctx.restore(); // end clip
@@ -338,7 +324,7 @@ function drawRingTop(yTop,ring,color,paintGapBg,shx=0){
   // isi donut
   ctx.fillStyle=color; donutPath(0,TAU,rOuter,rInner); ctx.fill();
 
-  // potong celah
+  // potong celah (hiasan)
   const gapS=rotW+gap.c-gap.a/2, gapE=gapS+gap.a;
   ctx.globalCompositeOperation='destination-out'; donutPath(gapS,gapE,rOuter,rInner); ctx.fill();
 
@@ -346,7 +332,7 @@ function drawRingTop(yTop,ring,color,paintGapBg,shx=0){
   if(paintGapBg){ ctx.globalCompositeOperation='destination-over'; ctx.fillStyle=cfg.gapBg; donutPath(gapS,gapE,rOuter,rInner); ctx.fill(); }
   ctx.globalCompositeOperation='source-over';
 
-  // blok
+  // blok hitam
   for(const b of blocks){ const s=rotW+b.c-b.a/2, e=s+b.a; ctx.fillStyle=cfg.block; donutPath(s,e,rOuter,rInner); ctx.fill(); }
 
   // edge
@@ -354,7 +340,7 @@ function drawRingTop(yTop,ring,color,paintGapBg,shx=0){
   ctx.beginPath(); ctx.arc(0,0,rOuter,0,TAU); ctx.stroke();
   ctx.beginPath(); ctx.arc(0,0,rInner,0,TAU); ctx.stroke();
 
-  // kedalaman lubang (well)
+  // kedalaman lubang
   const well=ctx.createRadialGradient(0,0,rInner*0.2,0,0,rInner*1.05);
   well.addColorStop(0,'rgba(0,0,0,0.18)');
   well.addColorStop(1,'rgba(0,0,0,0)');
