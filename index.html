@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-<title>Helix – Tanpa Pilar (Ring Rapat, Auto Rotate)</title>
+<title>Helix – Tanpa Pilar (Black = Game Over, Bola Mantul di Atas Ring)</title>
 <style>
   html,body{height:100%;margin:0;overflow:hidden;background:#120F26}
   body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
@@ -60,8 +60,8 @@ const cfg={
   ringScaleY:0.62, tiltPx:28, cameraZoom:1.06,
   frontWallPx:14, dropShadowPx:6,
 
-  // geometri ring (inner radius fix – tanpa pilar)
-  innerHoleRatio:0.12,    // ukuran lubang pusat relatif screen
+  // geometri ring (tanpa pilar)
+  innerHoleRatio:0.12,
   ringThickness:0.19,
   interLayerGapPx:4,
 
@@ -81,8 +81,9 @@ const cfg={
   // celah & blok
   gapDeg:120, blocksPerRing:1, blockDeg:44,
 
-  // bola idle
-  ballIdleLift:10, idleBounceAmp:6, idleBounceHz:1.8,
+  // bola idle/bounce
+  ballIdleLift:0,           // tak perlu diangkat; kita pakai permukaan ring
+  idleBounceAmp:6, idleBounceHz:1.8,
 
   // efek
   shakeAmp:8, shakeTime:0.22, particles:50
@@ -115,7 +116,7 @@ function resetWorld(){
   cameraY=0; cameraYTarget=0; shakeT=0; parts.length=0; updateHud();
 
   const S=Math.min(W,H)*cfg.cameraZoom;
-  rInner = S*cfg.innerHoleRatio;         // ← tanpa pilar
+  rInner = S*cfg.innerHoleRatio;
   rOuter = rInner + S*cfg.ringThickness;
 
   ballX=W/2; ballY=H*cfg.ballYRatio; ballR=cfg.ballR*DPR;
@@ -163,28 +164,35 @@ function loop(){
   cameraY += (cameraYTarget-cameraY)*Math.min(1,cfg.cameraEase*60*dt);
   if(!holding && !gameOver) bounceT+=dt;
 
-  if(holding && !gameOver){
-    const prev=cameraY - fallSpeed*dt;
-    for(const r of rings){
-      const was=r.y-prev, cur=r.y-cameraY;
-      if(!(was>=ballY && cur<ballY)) continue;
+  // === DETEKSI CROSSING: PRIORITAS HITAM ===
+  if (holding && !gameOver) {
+    const prev = cameraY - fallSpeed * dt;
+    const HIT_PAD = RAD(6); // toleransi tepi block
 
-      const rotW=r.rot+worldTheta;
-      const phi=angNorm(frontDir-rotW);
-      const inGap=Math.abs(angDiff(phi,r.gap.c))<=r.gap.a/2;
+    for (const r of rings) {
+      const was = r.y - prev, cur = r.y - cameraY;
+      if (!(was >= ballY && cur < ballY)) continue;
 
-      let inBlack=false;
-      for(const b of r.blocks){ if(Math.abs(angDiff(phi,b.c))<=b.a/2){inBlack=true;break;} }
+      const rotW = r.rot + worldTheta;
+      const phi  = angNorm(frontDir - rotW);
 
-      if(inGap){
-        streak++; mult=Math.min(6,1+Math.floor(streak/3));
+      // 1) block dulu => mati
+      let hitBlack = false;
+      for (const b of r.blocks) {
+        if (Math.abs(angDiff(phi, b.c)) <= (b.a/2 + HIT_PAD)) { hitBlack = true; break; }
+      }
+      if (hitBlack) { doGameOver(); break; }
+
+      // 2) gap => skor
+      const inGap = Math.abs(angDiff(phi, r.gap.c)) <= (r.gap.a / 2);
+      if (inGap) {
+        streak++; mult = Math.min(6, 1 + Math.floor(streak/3));
         score += 1*mult; updateHud();
-        fallSpeed=Math.min(cfg.fallMax,fallSpeed+cfg.fallStep);
-        spinSpeed=Math.min(cfg.spinMax,spinSpeed+cfg.spinGain);
-        spawnParticles(r.y-cameraY);
-      }else if(inBlack){
-        doGameOver(); break;
-      }else{
+        fallSpeed = Math.min(cfg.fallMax, fallSpeed + cfg.fallStep);
+        spinSpeed = Math.min(cfg.spinMax,  spinSpeed + cfg.spinGain);
+        spawnParticles(r.y - cameraY);
+      } else {
+        // 3) segmen kuning => ketahan
         streak=0; mult=1; updateHud(); holding=false;
       }
     }
@@ -258,7 +266,45 @@ function draw(){
   }
 
   jobs.sort((a,b)=>b.depth-a.depth); for(const j of jobs) j.draw();
-  ctx.restore();
+
+  // ===== Bola: “di atas ring depan” saat idle =====
+  // cari permukaan ring depan tepat di atas posisi bola
+  let surfaceY = null;
+  for (const r of rings) {
+    const y = r.y - cameraY;
+    const yFront = Math.round(y - cfg.tiltPx*0.4);
+    // permukaan depan yang paling dekat di atas bola
+    if (yFront >= ballY - 2 && (surfaceY === null || yFront < surfaceY)) {
+      surfaceY = yFront;
+    }
+  }
+
+  // gambar shadow kontak (ellipse) di permukaan saat idle
+  if (!holding && surfaceY !== null) {
+    ctx.save();
+    ctx.translate(W/2 + shx*0.35, surfaceY + shy*0.35);
+    ctx.scale(1, cfg.ringScaleY);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, ballR*0.9, ballR*0.35, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // posisi bola
+  let bY;
+  if (holding || gameOver || surfaceY === null) {
+    // normal (turun / gameover / belum dapat permukaan)
+    const lift = holding?0:0;
+    bY = ballY - lift + (holding?0:Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz)*cfg.idleBounceAmp);
+  } else {
+    // duduk di permukaan ring dan memantul ke atas
+    const base = surfaceY - ballR; // menyentuh permukaan
+    const bob  = Math.abs(Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz))*cfg.idleBounceAmp;
+    bY = base - bob; // memantul ke atas (tidak menembus permukaan)
+  }
+
+  ctx.restore(); // end clip
 
   // Fade bawah
   const fg=ctx.createLinearGradient(0,cutY-10,0,H);
@@ -272,9 +318,7 @@ function draw(){
     ctx.beginPath(); ctx.arc(p.x,p.y,Math.max(1,2*DPR*a),0,TAU); ctx.fill();
   }
 
-  // Bola
-  const lift=holding?0:cfg.ballIdleLift;
-  const bY=ballY-lift+(holding?0:Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz)*cfg.idleBounceAmp);
+  // Bola (terakhir, selalu di depan)
   ctx.fillStyle='#34B6FF';
   ctx.beginPath(); ctx.arc(W/2+shx*0.35,bY+shy*0.35,ballR,0,TAU); ctx.fill();
   ctx.fillStyle='rgba(255,255,255,.25)';
@@ -305,7 +349,7 @@ function drawRingTop(yTop,ring,color,paintGapBg,shx=0){
   ctx.beginPath(); ctx.arc(0,0,rOuter,0,TAU); ctx.stroke();
   ctx.beginPath(); ctx.arc(0,0,rInner,0,TAU); ctx.stroke();
 
-  // well shading di lubang (biar ada kedalaman, tanpa pilar)
+  // well shading (kedalaman lubang)
   const well=ctx.createRadialGradient(0,0,rInner*0.2,0,0,rInner*1.05);
   well.addColorStop(0,'rgba(0,0,0,0.18)');
   well.addColorStop(1,'rgba(0,0,0,0)');
