@@ -3,386 +3,354 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-<title>Helix – Bottom-Up (Layer Rapi)</title>
+<title>Helix – Tanpa Pilar (Ring Rapat, Auto Rotate)</title>
 <style>
   html,body{height:100%;margin:0;overflow:hidden;background:#120F26}
   body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
   #hud{position:fixed;top:10px;left:12px;right:12px;display:flex;justify-content:space-between;z-index:10;color:#fff;font-weight:700;text-shadow:0 1px 0 rgba(0,0,0,.3);user-select:none}
   #score{font-size:18px}
   #hint{font-size:12px;color:#cfe;opacity:.9;font-weight:600}
-  canvas{display:block;width:100vw;height:100vh;touch-action:none}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none;cursor:pointer}
+  #overlay{position:fixed;inset:0;display:none;place-items:center;z-index:20;background:rgba(7,6,18,.55);color:#fff;text-align:center;backdrop-filter:blur(4px)}
+  #card{padding:18px 22px;border-radius:16px;background:rgba(20,18,40,.85);box-shadow:0 8px 28px rgba(0,0,0,.35);min-width:260px}
+  #card h1{margin:4px 0 10px;font-size:28px;letter-spacing:.5px}
+  #card p{margin:6px 0;color:#cfe;font-weight:600}
+  #restart{margin-top:12px;background:#22d3ee;color:#001018;font-weight:800;padding:10px 16px;border-radius:12px;display:inline-block;cursor:pointer}
 </style>
 </head>
 <body>
-  <div id="hud"><div id="score">Skor: 0</div><div id="hint">Swipe memutar • Tahan untuk turun (lolos via celah, hindari blok hitam)</div></div>
+  <div id="hud">
+    <div id="score">Skor: 0 • Best: 0 • ×1</div>
+    <div id="hint">Tahan: turun • Lepas: berhenti • Ring berputar otomatis</div>
+  </div>
+  <div id="overlay">
+    <div id="card">
+      <h1 id="ov-title">GAME OVER</h1>
+      <p id="ov-score">Skor: 0 • Best: 0</p>
+      <div id="restart">Tap untuk bermain lagi</div>
+    </div>
+  </div>
   <canvas id="c"></canvas>
 
 <script>
-(() => {
-  // ===== Canvas =====
-  const cv = document.getElementById('c');
-  const ctx = cv.getContext('2d',{alpha:false});
-  let DPR = devicePixelRatio||1, W=0, H=0;
-  function resize(){
-    DPR = devicePixelRatio||1;
-    W = Math.max(1,Math.floor(innerWidth*DPR));
-    H = Math.max(1,Math.floor(innerHeight*DPR));
-    cv.width=W; cv.height=H; cv.style.width=(W/DPR)+'px'; cv.style.height=(H/DPR)+'px';
+(()=>{
+// ===== Canvas =====
+const cv=document.getElementById('c'); const ctx=cv.getContext('2d',{alpha:false});
+let DPR=devicePixelRatio||1,W=0,H=0;
+function resize(){DPR=devicePixelRatio||1;W=Math.max(1,Math.floor(innerWidth*DPR));H=Math.max(1,Math.floor(innerHeight*DPR));
+  cv.width=W;cv.height=H;cv.style.width=(W/DPR)+'px';cv.style.height=(H/DPR)+'px';}
+addEventListener('resize',resize,{passive:true});resize();
+const scoreEl=document.getElementById('score');
+
+// Overlay
+const overlay=document.getElementById('overlay');
+const ovTitle=document.getElementById('ov-title');
+const ovScore=document.getElementById('ov-score');
+const restartBtn=document.getElementById('restart');
+
+// ===== Config (tanpa pilar) =====
+const cfg={
+  // warna
+  bgTop:'#6F62D6', bgBot:'#2A2C46',
+  ringFront:'#E5F24A', ringBack:'#C6CF35',
+  ringEdge:'#000', gapBg:'#0E0E10',
+  block:'#000', shadow:'rgba(0,0,0,.22)',
+
+  // kamera dari bawah
+  ringScaleY:0.62, tiltPx:28, cameraZoom:1.06,
+  frontWallPx:14, dropShadowPx:6,
+
+  // geometri ring (inner radius fix – tanpa pilar)
+  innerHoleRatio:0.12,    // ukuran lubang pusat relatif screen
+  ringThickness:0.19,
+  interLayerGapPx:4,
+
+  // layout tower
+  visibleRings:14, bufferRings:12,
+  startFrontGapPx:12,
+  bottomCutRatio:0.94,
+
+  // gameplay
+  ballR:18, ballYRatio:0.30,
+  fallSpeed:260, fallStep:10, fallMax:560,
+  cameraEase:0.14,
+
+  // auto-rotate
+  spinStart:1.0, spinGain:0.05, spinMax:2.6, spinDir:1,
+
+  // celah & blok
+  gapDeg:120, blocksPerRing:1, blockDeg:44,
+
+  // bola idle
+  ballIdleLift:10, idleBounceAmp:6, idleBounceHz:1.8,
+
+  // efek
+  shakeAmp:8, shakeTime:0.22, particles:50
+};
+
+// ===== World =====
+const PI=Math.PI,TAU=PI*2,RAD=d=>d*PI/180;
+const frontDir=-PI/2;
+const angNorm=a=>{while(a<=-PI)a+=TAU;while(a>PI)a-=TAU;return a;}
+const angDiff=(a,b)=>Math.atan2(Math.sin(a-b),Math.cos(a-b));
+
+let rInner=0,rOuter=0,layerSpacing=0;
+let worldTheta=0,cameraY=0,cameraYTarget=0,score=0,best=+localStorage.getItem('helix_best')||0;
+let fallSpeed=cfg.fallSpeed,bounceT=0,spinSpeed=cfg.spinStart;
+let ballX=0,ballY=0,ballR=cfg.ballR*DPR;
+let holding=false,gameOver=false,streak=0,mult=1,shakeT=0;
+
+const parts=[];
+function spawnParticles(y){
+  for(let i=0;i<cfg.particles;i++){
+    const a=Math.random()*TAU, sp=80+Math.random()*220;
+    parts.push({x:W/2,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp*0.35,t:0,life:.5+Math.random()*.35});
   }
-  addEventListener('resize',resize,{passive:true}); resize();
-  const scoreEl = document.getElementById('score');
+}
 
-  // ===== Config (BOTTOM-UP) =====
-  const cfg = {
-    // warna
-    bgTop:'#6F62D6', bgBot:'#2A2C46',
-    pillarTop:'#FFFFFF', pillarBot:'#E8EBFF',
-    ringFront:'#E5F24A', ringBack:'#C6CF35',
-    ringEdge:'#000', gapBg:'#0E0E10',
-    block:'#000', shadow:'rgba(0,0,0,.20)',
+function resetWorld(){
+  gameOver=false; overlay.style.display='none';
+  score=0; streak=0; mult=1;
+  fallSpeed=cfg.fallSpeed; spinSpeed=cfg.spinStart; bounceT=0; worldTheta=0;
+  cameraY=0; cameraYTarget=0; shakeT=0; parts.length=0; updateHud();
 
-    // kamera dari BAWAH
-    ringScaleY:0.60,   // makin kecil → makin “dari bawah”
-    tiltPx:30,         // beda ketinggian front/back
-    cameraZoom:1.06,
-    frontWallPx:16,    // tebal dinding depan
-    dropShadowPx:6,
+  const S=Math.min(W,H)*cfg.cameraZoom;
+  rInner = S*cfg.innerHoleRatio;         // ← tanpa pilar
+  rOuter = rInner + S*cfg.ringThickness;
 
-    // geometri
-    pillarRatio:0.085,
-    gapToPillar:0.06,
-    ringThickness:0.14,
+  ballX=W/2; ballY=H*cfg.ballYRatio; ballR=cfg.ballR*DPR;
+  layerSpacing=(rOuter-rInner)+cfg.interLayerGapPx;
 
-    // layout tower
-    visibleRings:14, bufferRings:10,
-    interLayerGapPx:6,        // ↑ sedikit biar layer kebaca jelas
-    startFrontGapPx:12,
-    bottomCutRatio:0.92,      // sembunyikan bawah
-
-    // gameplay
-    ballR:18, ballYRatio:0.30,
-    rotatePerPx:0.008,
-    holdDelayMs:120, holdSlop:18,
-    fallSpeed:260, fallStep:8, fallMax:540,
-
-    // 1 celah aman + blok hitam
-    gapDeg:110,
-    blocksPerRing:1,
-    blockDeg:42,
-
-    // bola idle
-    ballIdleLift:10, idleBounceAmp:6, idleBounceHz:1.8,
-  };
-
-  // ===== World =====
-  const PI=Math.PI, TAU=PI*2, RAD=d=>d*PI/180;
-  const frontDir = -PI/2; // arah tepat di bawah bola
-  const angNorm = a=>{while(a<=-PI)a+=TAU;while(a>PI)a-=TAU;return a;};
-  const angDiff = (a,b)=>Math.atan2(Math.sin(a-b),Math.cos(a-b));
-
-  let pillarR=0, rInner=0, rOuter=0, layerSpacing=0;
-  let worldTheta=0, cameraY=0, score=0, fallSpeed=cfg.fallSpeed, bounceT=0;
-  let ballX=0, ballY=0, ballR=cfg.ballR*DPR;
-
-  /** @type {{y:number, rot:number, gap:{c:number,a:number}, blocks:{c:number,a:number}[]}[]} */
-  let rings=[];
-
-  function resetWorld(){
-    score=0; scoreEl.textContent='Skor: 0';
-    worldTheta=0; cameraY=0; fallSpeed=cfg.fallSpeed; bounceT=0;
-
-    const S = Math.min(W,H)*cfg.cameraZoom;
-    pillarR = S*cfg.pillarRatio;
-    rInner  = pillarR + S*cfg.gapToPillar;
-    rOuter  = rInner + S*cfg.ringThickness;
-
-    ballX=W/2; ballY=H*cfg.ballYRatio; ballR=cfg.ballR*DPR;
-
-    layerSpacing = (rOuter-rInner) + cfg.interLayerGapPx;
-
-    rings.length=0;
-    const count=cfg.visibleRings+cfg.bufferRings;
-
-    // BOTTOM-UP: yFront = y - tilt*0.4 → ingin yFront ≈ ballY + startFrontGap
-    let y = (ballY + cfg.startFrontGapPx) + cfg.tiltPx*0.4 - layerSpacing;
-
-    for(let i=0;i<count;i++){
-      y += layerSpacing;
-
-      const rot = Math.random()*TAU - PI;
-
-      const gap = { c: Math.random()*TAU - PI, a: RAD(cfg.gapDeg) };
-
-      const blocks=[];
-      const minSep = RAD(cfg.gapDeg*0.55);
-      for(let k=0;k<cfg.blocksPerRing;k++){
-        let c;
-        for(let t=0;t<20;t++){
-          c = Math.random()*TAU - PI;
-          if(Math.abs(angDiff(c, gap.c)) > (gap.a/2 + minSep)) break;
-        }
-        blocks.push({c, a: RAD(cfg.blockDeg)});
-      }
-
-      rings.push({y, rot, gap, blocks});
+  rings.length=0; const count=cfg.visibleRings+cfg.bufferRings;
+  let y=(ballY+cfg.startFrontGapPx)+cfg.tiltPx*0.4-layerSpacing;
+  for(let i=0;i<count;i++){
+    y+=layerSpacing;
+    const rot=Math.random()*TAU-PI;
+    const gap={c:Math.random()*TAU-PI,a:RAD(cfg.gapDeg)};
+    const blocks=[]; const minSep=RAD(cfg.gapDeg*0.55);
+    for(let k=0;k<cfg.blocksPerRing;k++){
+      let c; for(let t=0;t<20;t++){ c=Math.random()*TAU-PI; if(Math.abs(angDiff(c,gap.c))>(gap.a/2+minSep)) break; }
+      blocks.push({c,a:RAD(cfg.blockDeg)});
     }
+    rings.push({y,rot,gap,blocks});
   }
+}
 
-  // ===== Input =====
-  let pointerDown=false, holding=false, holdTimer=null, accumDx=0, lastX=0;
-  function startHold(){ clearTimeout(holdTimer); holdTimer=setTimeout(()=>{ if(pointerDown && accumDx<=cfg.holdSlop) holding=true; }, cfg.holdDelayMs); }
-  function cancelHold(){ pointerDown=false; clearTimeout(holdTimer); holding=false; }
-  function onDown(x){ pointerDown=true; accumDx=0; lastX=x; startHold(); }
-  function onMove(x){ if(!pointerDown) return; const dx=x-lastX; lastX=x; worldTheta -= dx*cfg.rotatePerPx; if(!holding){ accumDx+=Math.abs(dx); if(accumDx>cfg.holdSlop) clearTimeout(holdTimer);} }
+// input
+function onDown(){if(gameOver)return; holding=true;}
+function onUp(){if(gameOver)return; holding=false;}
+if('onpointerdown'in window){
+  cv.addEventListener('pointerdown',e=>{e.preventDefault();onDown();});
+  addEventListener('pointerup',onUp,{passive:true});
+  addEventListener('pointercancel',onUp,{passive:true});
+}else{
+  cv.addEventListener('touchstart',e=>{e.preventDefault();onDown();},{passive:false});
+  addEventListener('touchend',onUp,{passive:true});
+  addEventListener('touchcancel',onUp,{passive:true});
+  cv.addEventListener('mousedown',e=>{e.preventDefault();onDown();});
+  addEventListener('mouseup',onUp,{passive:true});
+}
+restartBtn.addEventListener('click',()=>resetWorld());
+overlay.addEventListener('click',()=>resetWorld());
 
-  if('onpointerdown' in window){
-    cv.addEventListener('pointerdown',e=>{e.preventDefault(); onDown(e.clientX);});
-    addEventListener('pointermove',e=>onMove(e.clientX),{passive:true});
-    addEventListener('pointerup',cancelHold,{passive:true});
-    addEventListener('pointercancel',cancelHold,{passive:true});
-  }else{
-    cv.addEventListener('touchstart',e=>{const t=e.changedTouches[0]; e.preventDefault(); onDown(t.clientX);},{passive:false});
-    addEventListener('touchmove',e=>{const t=e.changedTouches[0]; onMove(t.clientX);},{passive:true});
-    addEventListener('touchend',cancelHold,{passive:true});
-    addEventListener('touchcancel',cancelHold,{passive:true});
-    cv.addEventListener('mousedown',e=>{e.preventDefault(); onDown(e.clientX);});
-    addEventListener('mousemove',e=>onMove(e.clientX),{passive:true});
-    addEventListener('mouseup',cancelHold,{passive:true});
-  }
+// loop
+let last=performance.now()/1000;
+function loop(){
+  const now=performance.now()/1000,dt=Math.min(0.05,now-last); last=now;
 
-  // ===== Loop =====
-  let last=performance.now()/1000;
-  function loop(){
-    const now=performance.now()/1000, dt=Math.min(0.05, now-last); last=now;
-    if(holding) cameraY += fallSpeed*dt;
-    else        bounceT += dt;
+  worldTheta += cfg.spinDir*spinSpeed*dt;
+  if(holding) cameraYTarget += fallSpeed*dt;
+  cameraY += (cameraYTarget-cameraY)*Math.min(1,cfg.cameraEase*60*dt);
+  if(!holding && !gameOver) bounceT+=dt;
 
-    // crossing saat tahan
-    if(holding){
-      const prev=cameraY - fallSpeed*dt;
-      for(const r of rings){
-        const was = r.y - prev, cur = r.y - cameraY;
-        if(!(was >= ballY && cur < ballY)) continue;
-
-        const phi = angNorm(frontDir + worldTheta - r.rot);
-
-        const inGap = Math.abs(angDiff(phi, r.gap.c)) <= r.gap.a/2;
-
-        let inBlack=false;
-        for(const b of r.blocks){
-          if(Math.abs(angDiff(phi,b.c)) <= b.a/2){ inBlack=true; break; }
-        }
-
-        if(inGap){
-          score++; scoreEl.textContent='Skor: '+score;
-          fallSpeed = Math.min(cfg.fallMax, fallSpeed + cfg.fallStep);
-        }else if(inBlack){
-          setTimeout(()=>resetWorld(), 250);
-          break;
-        }else{
-          // kena ring kuning → berhenti turun
-          holding=false;
-        }
-      }
-    }
-
-    recycle();
-    draw();
-    requestAnimationFrame(loop);
-  }
-
-  function recycle(){
-    rings = rings.filter(r => (r.y - cameraY) > -260);
-    const target = cfg.visibleRings + cfg.bufferRings;
-    while(rings.length < target){
-      const lastY = rings[rings.length-1].y;
-      const rot = Math.random()*TAU - PI;
-      const gap = { c: Math.random()*TAU - PI, a: RAD(cfg.gapDeg) };
-      const blocks=[];
-      const minSep = RAD(cfg.gapDeg*0.55);
-      for(let k=0;k<cfg.blocksPerRing;k++){
-        let c;
-        for(let t=0;t<20;t++){
-          c = Math.random()*TAU - PI;
-          if(Math.abs(angDiff(c, gap.c)) > (gap.a/2 + minSep)) break;
-        }
-        blocks.push({c, a: RAD(cfg.blockDeg)});
-      }
-      rings.push({y: lastY + layerSpacing, rot, gap, blocks});
-    }
-  }
-
-  // ===== Render (Painter’s Algorithm) =====
-  function draw(){
-    // BG
-    const g=ctx.createLinearGradient(0,0,0,H);
-    g.addColorStop(0,cfg.bgTop); g.addColorStop(1,cfg.bgBot);
-    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
-
-    const cutY = Math.floor(H*cfg.bottomCutRatio);
-    ctx.save(); ctx.beginPath(); ctx.rect(0,0,W,cutY); ctx.clip();
-
-    // Pilar
-    const pX = W/2 - pillarR;
-    const pg = ctx.createLinearGradient(pX,0,pX+pillarR*2,0);
-    pg.addColorStop(0,cfg.pillarBot); pg.addColorStop(.5,cfg.pillarTop); pg.addColorStop(1,cfg.pillarBot);
-    ctx.fillStyle=pg; roundRect(ctx,pX,0,pillarR*2,H,pillarR); ctx.fill();
-
-    // Kumpulkan tugas gambar + kedalaman
-    /** @type {{depth:number, draw:Function}[]} */
-    const jobs = [];
-
+  if(holding && !gameOver){
+    const prev=cameraY - fallSpeed*dt;
     for(const r of rings){
-      const y = r.y - cameraY; if(y<-280 || y>H+280) continue;
+      const was=r.y-prev, cur=r.y-cameraY;
+      if(!(was>=ballY && cur<ballY)) continue;
 
-      // BOTTOM-UP: front lebih ATAS (y kecil), back lebih BAWAH (y besar)
-      const yFront = Math.round(y - cfg.tiltPx*0.4);
-      const yBack  = Math.round(y + cfg.tiltPx*0.6);
+      const rotW=r.rot+worldTheta;
+      const phi=angNorm(frontDir-rotW);
+      const inGap=Math.abs(angDiff(phi,r.gap.c))<=r.gap.a/2;
 
-      // drop shadow (sedikit di bawah front) — ikut depth front agar tidak nutup top lain
-      jobs.push({
-        depth: yFront - 0.15,
-        draw: () => { ctx.save(); ctx.translate(W/2, yFront + cfg.dropShadowPx); ctx.scale(1, cfg.ringScaleY);
-          ctx.fillStyle=cfg.shadow; donutPath(0,TAU,rOuter*1.005,rInner*0.995); ctx.fill(); ctx.restore(); }
-      });
+      let inBlack=false;
+      for(const b of r.blocks){ if(Math.abs(angDiff(phi,b.c))<=b.a/2){inBlack=true;break;} }
 
-      // BACK top (lebih jauh)
-      jobs.push({ depth: yBack, draw: () => drawRingTop(yBack , r, cfg.ringBack, false) });
-
-      // FRONT wall (lebih dekat dari back, tapi di belakang front top)
-      jobs.push({ depth: yFront - 0.05, draw: () => drawRingWallFront(yFront, r, cfg.frontWallPx) });
-
-      // FRONT top (paling dekat)
-      jobs.push({ depth: yFront - 0.10, draw: () => drawRingTop(yFront, r, cfg.ringFront, true) });
-    }
-
-    // Urutkan dari yang PALING JAUH ke PALING DEKAT (depth besar → duluan)
-    jobs.sort((a,b)=>b.depth - a.depth);
-    for(const j of jobs) j.draw();
-
-    ctx.restore();
-
-    // Fade bawah
-    const fg=ctx.createLinearGradient(0,cutY-10,0,H);
-    fg.addColorStop(0,'rgba(18,15,38,0)');
-    fg.addColorStop(1,'rgba(18,15,38,1)');
-    ctx.fillStyle=fg; ctx.fillRect(0,cutY-10,W,H-(cutY-10));
-
-    // Bola – terakhir
-    const lift = holding?0:cfg.ballIdleLift;
-    const bY = ballY - lift + (holding?0:Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz)*cfg.idleBounceAmp);
-    ctx.fillStyle='#34B6FF';
-    ctx.beginPath(); ctx.arc(W/2, bY, ballR, 0, TAU); ctx.fill();
-    ctx.fillStyle='rgba(255,255,255,.25)';
-    ctx.beginPath(); ctx.arc(W/2 - ballR*0.35, bY - ballR*0.35, ballR*0.4, 0, TAU); ctx.fill();
-  }
-
-  // ===== Gambar top-face donut penuh → potong celah → blok → edge
-  function drawRingTop(yTop, ring, color, paintGapBg){
-    const {rot, gap, blocks} = ring;
-
-    ctx.save();
-    ctx.translate(W/2, yTop);
-    ctx.scale(1, cfg.ringScaleY);
-
-    // isi donut penuh
-    ctx.fillStyle=color;
-    donutPath(0,TAU,rOuter,rInner); ctx.fill();
-
-    // potong celah aman
-    const gapS = rot + gap.c - gap.a/2;
-    const gapE = gapS + gap.a;
-    ctx.globalCompositeOperation='destination-out';
-    donutPath(gapS,gapE,rOuter,rInner); ctx.fill();
-
-    // warnai background celah (biar terlihat)
-    if(paintGapBg){
-      ctx.globalCompositeOperation='destination-over';
-      ctx.fillStyle=cfg.gapBg;
-      donutPath(gapS,gapE,rOuter,rInner); ctx.fill();
-    }
-    ctx.globalCompositeOperation='source-over';
-
-    // blok hitam
-    for(const b of blocks){
-      const s = rot + b.c - b.a/2;
-      const e = s + b.a;
-      ctx.fillStyle=cfg.block;
-      donutPath(s,e,rOuter,rInner); ctx.fill();
-    }
-
-    // edge
-    ctx.strokeStyle=cfg.ringEdge;
-    ctx.lineWidth = 2 / cfg.ringScaleY;
-    ctx.beginPath(); ctx.arc(0,0,rOuter,0,TAU); ctx.stroke();
-    ctx.beginPath(); ctx.arc(0,0,rInner,0,TAU); ctx.stroke();
-
-    ctx.restore();
-  }
-
-  // ===== Dinding depan (front wall) – half PI..2PI, dipotong celah & blok
-  function drawRingWallFront(yFront, ring, wallPx){
-    const {rot, gap, blocks} = ring;
-    ctx.save();
-    ctx.translate(W/2, yFront);
-    ctx.scale(1, cfg.ringScaleY);
-
-    const y0=0, y1=wallPx;
-
-    function wallPath(a0,a1){
-      ctx.beginPath();
-      ctx.arc(0,y1, rOuter, a0, a1, false);
-      ctx.arc(0,y0, rOuter, a1, a0, true);
-      ctx.arc(0,y0, rInner, a0, a1, false);
-      ctx.arc(0,y1, rInner, a1, a0, true);
-      ctx.closePath();
-    }
-
-    // seluruh FRONT half
-    ctx.fillStyle='rgba(0,0,0,0.75)';
-    wallPath(Math.PI, Math.PI*2);
-    ctx.fill();
-
-    // potong celah & blok hanya area FRONT half
-    ctx.globalCompositeOperation='destination-out';
-    clipHalf(rot + gap.c - gap.a/2, rot + gap.c + gap.a/2, Math.PI, Math.PI*2, wallPath);
-    for(const b of blocks){
-      clipHalf(rot + b.c - b.a/2, rot + b.c + b.a/2, Math.PI, Math.PI*2, wallPath);
-    }
-    ctx.restore();
-    ctx.globalCompositeOperation='source-over';
-
-    function clipHalf(a0,a1,half0,half1,path){
-      let s=a0,e=a1; while(e<=s) e+=TAU;
-      for(let k=-1;k<=1;k++){
-        const ss=s+k*TAU, ee=e+k*TAU;
-        const a=Math.max(half0, ss), b=Math.min(half1, ee);
-        if(b>a+1e-3){ path(a,b); ctx.fill(); }
+      if(inGap){
+        streak++; mult=Math.min(6,1+Math.floor(streak/3));
+        score += 1*mult; updateHud();
+        fallSpeed=Math.min(cfg.fallMax,fallSpeed+cfg.fallStep);
+        spinSpeed=Math.min(cfg.spinMax,spinSpeed+cfg.spinGain);
+        spawnParticles(r.y-cameraY);
+      }else if(inBlack){
+        doGameOver(); break;
+      }else{
+        streak=0; mult=1; updateHud(); holding=false;
       }
     }
   }
 
-  // ===== Geometry helpers =====
-  function donutPath(a0,a1,rOut,rIn){
-    let s=a0,e=a1; while(e<=s) e+=TAU;
-    ctx.beginPath();
-    ctx.arc(0,0,rOut,s,e,false);
-    ctx.arc(0,0,rIn ,e,s,true);
-    ctx.closePath();
+  // parts
+  for(let i=parts.length-1;i>=0;i--){
+    const p=parts[i]; p.t+=dt; if(p.t>p.life){parts.splice(i,1);continue;}
+    p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=400*dt;
   }
-  function roundRect(ctx,x,y,w,h,r){
-    ctx.beginPath();
-    const rr=Math.min(r,w/2,h/2);
-    ctx.moveTo(x+rr,y);
-    ctx.arcTo(x+w,y,x+w,y+h,rr);
-    ctx.arcTo(x+w,y+h,x,y+h,rr);
-    ctx.arcTo(x,y+h,x,y,rr);
-    ctx.arcTo(x,y,x+w,y,rr);
-    ctx.closePath();
+  if(shakeT>0) shakeT=Math.max(0,shakeT-dt);
+
+  recycle(); draw(); requestAnimationFrame(loop);
+}
+
+function doGameOver(){
+  gameOver=true; holding=false; streak=0; mult=1; updateHud();
+  best=Math.max(best,score); localStorage.setItem('helix_best',best);
+  shakeT=cfg.shakeTime;
+  setTimeout(()=>{ovTitle.textContent='GAME OVER'; ovScore.textContent=`Skor: ${score} • Best: ${best}`; overlay.style.display='grid';},220);
+}
+function updateHud(){ scoreEl.textContent=`Skor: ${score} • Best: ${best} • ×${mult}`; }
+
+function recycle(){
+  rings = rings.filter(r => (r.y - cameraY) > -300);
+  const target=cfg.visibleRings+cfg.bufferRings;
+  while(rings.length<target){
+    const lastY=rings[rings.length-1].y;
+    const rot=Math.random()*TAU-PI;
+    const gap={c:Math.random()*TAU-PI,a:RAD(cfg.gapDeg)};
+    const blocks=[]; const minSep=RAD(cfg.gapDeg*0.55);
+    for(let k=0;k<cfg.blocksPerRing;k++){
+      let c; for(let t=0;t<20;t++){ c=Math.random()*TAU-PI; if(Math.abs(angDiff(c,gap.c))>(gap.a/2+minSep)) break; }
+      blocks.push({c,a:RAD(cfg.blockDeg)});
+    }
+    rings.push({y:lastY+layerSpacing,rot,gap,blocks});
+  }
+}
+
+// ===== Render =====
+function draw(){
+  // BG
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,cfg.bgTop); g.addColorStop(1,cfg.bgBot);
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+  const cutY=Math.floor(H*cfg.bottomCutRatio);
+  ctx.save(); ctx.beginPath(); ctx.rect(0,0,W,cutY); ctx.clip();
+
+  const jobs=[];
+  const shx=(shakeT>0?(Math.random()*2-1)*cfg.shakeAmp*DPR*(shakeT/cfg.shakeTime):0);
+  const shy=(shakeT>0?(Math.random()*2-1)*cfg.shakeAmp*0.6*DPR*(shakeT/cfg.shakeTime):0);
+
+  for(const r of rings){
+    const y=r.y-cameraY; if(y<-320||y>H+320) continue;
+    const yFront=Math.round(y-cfg.tiltPx*0.4);
+    const yBack =Math.round(y+cfg.tiltPx*0.6);
+
+    // bayangan halus
+    jobs.push({depth:yFront-0.15, draw:()=>{ctx.save();ctx.translate(W/2+shx,yFront+cfg.dropShadowPx+shy);ctx.scale(1,cfg.ringScaleY);
+      ctx.fillStyle=cfg.shadow; donutPath(0,TAU,rOuter*1.005,rInner*0.995); ctx.fill(); ctx.restore();}});
+
+    // BACK top
+    jobs.push({depth:yBack, draw:()=>drawRingTop(yBack+shy,r,cfg.ringBack,false,shx)});
+
+    // FRONT wall
+    jobs.push({depth:yFront-0.05, draw:()=>drawRingWallFront(yFront+shy,r,cfg.frontWallPx,shx)});
+
+    // FRONT top
+    jobs.push({depth:yFront-0.10, draw:()=>drawRingTop(yFront+shy,r,cfg.ringFront,true,shx)});
   }
 
-  // ===== Boot =====
-  resetWorld(); requestAnimationFrame(function raf(){ (function loopWrap(){ loop(); requestAnimationFrame(loopWrap); })(); });
+  jobs.sort((a,b)=>b.depth-a.depth); for(const j of jobs) j.draw();
+  ctx.restore();
+
+  // Fade bawah
+  const fg=ctx.createLinearGradient(0,cutY-10,0,H);
+  fg.addColorStop(0,'rgba(18,15,38,0)'); fg.addColorStop(1,'rgba(18,15,38,1)');
+  ctx.fillStyle=fg; ctx.fillRect(0,cutY-10,W,H-(cutY-10));
+
+  // Partikel
+  for(const p of parts){
+    const a=1-(p.t/p.life);
+    ctx.fillStyle=`rgba(255,255,255,${0.7*a})`;
+    ctx.beginPath(); ctx.arc(p.x,p.y,Math.max(1,2*DPR*a),0,TAU); ctx.fill();
+  }
+
+  // Bola
+  const lift=holding?0:cfg.ballIdleLift;
+  const bY=ballY-lift+(holding?0:Math.sin(bounceT*2*Math.PI*cfg.idleBounceHz)*cfg.idleBounceAmp);
+  ctx.fillStyle='#34B6FF';
+  ctx.beginPath(); ctx.arc(W/2+shx*0.35,bY+shy*0.35,ballR,0,TAU); ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.25)';
+  ctx.beginPath(); ctx.arc(W/2-ballR*0.35+shx*0.35,bY-ballR*0.35+shy*0.35,ballR*0.4,0,TAU); ctx.fill();
+}
+
+// ===== Ring rendering =====
+function drawRingTop(yTop,ring,color,paintGapBg,shx=0){
+  const {gap,blocks}=ring; const rotW=ring.rot+worldTheta;
+  ctx.save(); ctx.translate(W/2+shx,yTop); ctx.scale(1,cfg.ringScaleY);
+
+  // isi donut
+  ctx.fillStyle=color; donutPath(0,TAU,rOuter,rInner); ctx.fill();
+
+  // potong celah
+  const gapS=rotW+gap.c-gap.a/2, gapE=gapS+gap.a;
+  ctx.globalCompositeOperation='destination-out'; donutPath(gapS,gapE,rOuter,rInner); ctx.fill();
+
+  // dasar celah
+  if(paintGapBg){ ctx.globalCompositeOperation='destination-over'; ctx.fillStyle=cfg.gapBg; donutPath(gapS,gapE,rOuter,rInner); ctx.fill(); }
+  ctx.globalCompositeOperation='source-over';
+
+  // blok
+  for(const b of blocks){ const s=rotW+b.c-b.a/2, e=s+b.a; ctx.fillStyle=cfg.block; donutPath(s,e,rOuter,rInner); ctx.fill(); }
+
+  // edge
+  ctx.strokeStyle=cfg.ringEdge; ctx.lineWidth=2/cfg.ringScaleY;
+  ctx.beginPath(); ctx.arc(0,0,rOuter,0,TAU); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0,0,rInner,0,TAU); ctx.stroke();
+
+  // well shading di lubang (biar ada kedalaman, tanpa pilar)
+  const well=ctx.createRadialGradient(0,0,rInner*0.2,0,0,rInner*1.05);
+  well.addColorStop(0,'rgba(0,0,0,0.18)');
+  well.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=well; ctx.beginPath(); ctx.arc(0,0,rInner,0,TAU); ctx.fill();
+
+  ctx.restore();
+}
+function drawRingWallFront(yFront,ring,wallPx,shx=0){
+  const {gap,blocks}=ring; const rotW=ring.rot+worldTheta;
+  ctx.save(); ctx.translate(W/2+shx,yFront); ctx.scale(1,cfg.ringScaleY);
+  const y0=0,y1=wallPx;
+  function wallPath(a0,a1){
+    ctx.beginPath();
+    ctx.arc(0,y1,rOuter,a0,a1,false);
+    ctx.arc(0,y0,rOuter,a1,a0,true);
+    ctx.arc(0,y0,rInner,a0,a1,false);
+    ctx.arc(0,y1,rInner,a1,a0,true);
+    ctx.closePath();
+  }
+  ctx.fillStyle='rgba(0,0,0,0.75)'; wallPath(Math.PI,Math.PI*2); ctx.fill();
+  ctx.globalCompositeOperation='destination-out';
+  clipHalf(rotW+gap.c-gap.a/2,rotW+gap.c+gap.a/2,Math.PI,Math.PI*2,wallPath);
+  for(const b of blocks){ clipHalf(rotW+b.c-b.a/2,rotW+b.c+b.a/2,Math.PI,Math.PI*2,wallPath); }
+  ctx.restore(); ctx.globalCompositeOperation='source-over';
+
+  function clipHalf(a0,a1,half0,half1,path){
+    let s=a0,e=a1; while(e<=s) e+=TAU;
+    for(let k=-1;k<=1;k++){
+      const ss=s+k*TAU, ee=e+k*TAU;
+      const a=Math.max(half0,ss), b=Math.min(half1,ee);
+      if(b>a+1e-3){ path(a,b); ctx.fill(); }
+    }
+  }
+}
+
+// helpers
+function donutPath(a0,a1,rOut,rIn){
+  let s=a0,e=a1; while(e<=s) e+=TAU;
+  ctx.beginPath(); ctx.arc(0,0,rOut,s,e,false); ctx.arc(0,0,rIn,e,s,true); ctx.closePath();
+}
+
+// boot
+let rings=[]; resetWorld();
+requestAnimationFrame(function raf(){ (function loopWrap(){ loop(); requestAnimationFrame(loopWrap); })(); });
+
 })();
 </script>
 </body>
